@@ -1,0 +1,4 @@
+lxml
+# apache-airflow-providers-apache-spark
+requests
+pandas
