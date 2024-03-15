@@ -25,3 +25,21 @@ CREATE TABLE IF NOT EXISTS staging_table (
     suspect_meninggal INT,
     tanggal DATE,
 )
+-- CREATE FACT TABLES
+CREATE TABLE Province (
+    province_id INT PRIMARY KEY,
+    province_name VARCHAR(255)
+);
+
+CREATE TABLE District (
+    district_id INT PRIMARY KEY,
+    province_id INT,
+    district_name VARCHAR(255),
+    FOREIGN KEY (province_id) REFERENCES Province(province_id)
+);
+
+CREATE TABLE Case (
+    case_id SERIAL PRIMARY KEY,
+    status_name VARCHAR(255) CHECK (status_name IN ('SUSPECT', 'CLOSECONTACT', 'PROBABLE', 'CONFIRMATION')),
+    status_detail VARCHAR(255)
+);

@@ -3,20 +3,20 @@ CREATE DATABASE data_mart;
 
 -- CREATE TABLES
 CREATE TABLE Province (
-    province_id SERIAL PRIMARY KEY,
+    province_id INT PRIMARY KEY,
     province_name VARCHAR(255)
 );
 
 CREATE TABLE District (
-    district_id SERIAL PRIMARY KEY,
+    district_id INT PRIMARY KEY,
     province_id INT,
     district_name VARCHAR(255),
     FOREIGN KEY (province_id) REFERENCES Province(province_id)
 );
 
 CREATE TABLE Case (
-    Id SERIAL PRIMARY KEY,
-    status_name VARCHAR(255) CHECK (status_name IN ('suspect', 'closecontact', 'probable', 'confirmation')),
+    case_id SERIAL PRIMARY KEY,
+    status_name VARCHAR(255) CHECK (status_name IN ('SUSPECT', 'CLOSECONTACT', 'PROBABLE', 'CONFIRMATION')),
     status_detail VARCHAR(255)
 );
 

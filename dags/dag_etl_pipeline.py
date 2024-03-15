@@ -6,6 +6,8 @@ import json
 import psycopg2
 import mysql.connector
 import pandas as pd
+from sqlalchemy import create_engine
+import pymysql
 
 # Function to fetch data from API
 def fetch_data_from_api():
@@ -56,109 +58,176 @@ def load_data_to_mysql(**kwargs):
 def aggregate_district_data():
     # Fetch data from MySQL (Staging Area)
     # Aggregate district data
-    # Connect to the PostgreSQL database
-    conn = psycopg2.connect(
-        host='final_project_de-postgres-1',
-        user='postgres',
-        password='postgres',
+    # Connect to MySQL database
+    connection = mysql.connector.connect(
+        host='final_project_de-mysql-1',
+        user='airflow',
+        password='airflow',
         database='staging_area'
     )
-    cur = conn.cursor()
 
-    # Sample data
-    data = [
-        {
-            "CLOSECONTACT": 274,
-            "CONFIRMATION": 0,
-            "PROBABLE": 26,
-            "SUSPECT": 2210,
-            "closecontact_dikarantina": 0,
-            "closecontact_discarded": 274,
-            "closecontact_meninggal": 0,
-            "confirmation_meninggal": 0,
-            "confirmation_sembuh": 0,
-            "kode_kab": "3204",
-            "kode_prov": "32",
-            "nama_kab": "Kabupaten Bandung",
-            "nama_prov": "Jawa Barat",
-            "probable_diisolasi": 0,
-            "probable_discarded": 0,
-            "probable_meninggal": 26,
-            "suspect_diisolasi": 31,
-            "suspect_discarded": 2179,
-            "suspect_meninggal": 0,
-            "tanggal": "2020-08-05"
-        }
-    ]
+    engine = create_engine('mysql+pymysql://airflow:airflow@final_project_de-mysql-1/staging_area')
 
-    # Iterate over the data and insert into the tables
-    for record in data:
-        # Insert into Province table
-        cur.execute("INSERT INTO Province (province_name) VALUES (%s) ON CONFLICT DO NOTHING", (record["nama_prov"],))
-        conn.commit()
+    # Define your SQL query
+    sql_query = "SELECT * FROM staging_table;"
 
-        # Get the province_id for the inserted province
-        cur.execute("SELECT province_id FROM Province WHERE province_name = %s", (record["nama_prov"],))
-        province_id = cur.fetchone()[0]
+    # Use pandas.read_sql() to execute the query and load data into a DataFrame
+    df_staging = pd.read_sql(sql_query, connection)
 
-        # Insert into District table
-        cur.execute("INSERT INTO District (province_id, district_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (province_id, record["nama_kab"]))
-        conn.commit()
+    # Create Dimension Table
+    # Create province table
+    province_table = df_staging[['kode_prov', 'nama_prov']]
+    province_table = province_table.drop_duplicates()
+    province_table.rename(columns={'kode_prov':'province_id', 'nama_prov':'province_name'}, inplace=True)
+    
+    try:
+        province_table.to_sql(name='Province', con=engine, if_exists='append', index=False)
+    except:
+        pass
 
-        # Insert into Case table
-        for status in ['CLOSECONTACT', 'CONFIRMATION', 'PROBABLE', 'SUSPECT']:
-            cur.execute("INSERT INTO Case (status_name, status_detail) VALUES (%s, %s) ON CONFLICT DO NOTHING", (status, None))
-            conn.commit()
+    # # Create district table
+    district_table = df_staging[['kode_kab', 'kode_prov', 'nama_kab']]
+    district_table = district_table.drop_duplicates()
+    district_table.rename(columns={'kode_kab':'district_id', 'kode_prov':'province_id', 'nama_kab':'district_name'}, inplace=True)
+    
+    try:
+        district_table.to_sql(name='District', con=engine, if_exists='append', index=False)
+    except:
+        pass
 
-        # Insert into Province_Daily table
-        cur.execute("""
-            INSERT INTO Province_Daily (province_id, case_id, date, total)
-            VALUES (%s, (SELECT Id FROM Case WHERE status_name = 'CLOSECONTACT'), %s, %s)
-        """, (province_id, datetime.strptime(record["tanggal"], "%Y-%m-%d"), record["CLOSECONTACT"]))
-        conn.commit()
+    # Create case table
+    case_table_dict = { 'case_id' : [1,2,3,4,5,6,7,8,9,10,11],
+                        'status_name': ['CLOSECONTACT','CLOSECONTACT','CLOSECONTACT',
+                              'CONFIRMATION','CONFIRMATION',
+                              'PROBABLE','PROBABLE','PROBABLE',
+                              'SUSPECT', 'SUSPECT', 'SUSPECT'],
+                        'status_detail': ['closecontact_dikarantina', 'closecontact_discarded', 'closecontact_meninggal', 
+                                'confirmation_meninggal', 'confirmation_sembuh', 
+                                'probable_diisolasi', 'probable_discarded', 'probable_meninggal', 
+                                'suspect_diisolasi', 'suspect_discarded', 'suspect_meninggal']
+                     }
+    
+    case_table = pd.DataFrame(case_table_dict)
 
-        # Insert into Province_Monthly table
-        month = datetime.strptime(record["tanggal"], "%Y-%m-%d").month
-        cur.execute("""
-            INSERT INTO Province_Monthly (province_id, case_id, month, total)
-            VALUES (%s, (SELECT Id FROM Case WHERE status_name = 'CLOSECONTACT'), %s, %s)
-        """, (province_id, month, record["CLOSECONTACT"]))
-        conn.commit()
+    try:
+        case_table.to_sql(name='Cases', con=engine, if_exists='replace', index=False)
+    except:
+        pass
 
-        # Insert into Province_Yearly table
-        year = datetime.strptime(record["tanggal"], "%Y-%m-%d").year
-        cur.execute("""
-            INSERT INTO Province_Yearly (province_id, case_id, year, total)
-            VALUES (%s, (SELECT Id FROM Case WHERE status_name = 'CLOSECONTACT'), %s, %s)
-        """, (province_id, year, record["CLOSECONTACT"]))
-        conn.commit()
+    # Create Fact Table
+    # Aggregate for Province_Daily
+    # Group by province and calculate the total cases for each status
+    sql_query_province_daily = '''
+    SELECT 
+        CASE 
+            WHEN t.nama_prov IS NOT NULL THEN p.province_id
+            ELSE NULL
+        END AS province_id,
+        t.tanggal AS date,
+        t.CLOSECONTACT + t.CONFIRMATION + t.PROBABLE + t.SUSPECT AS total
+    FROM staging_table t
+    LEFT JOIN Province p ON t.nama_prov = p.province_name;
+    '''
+    #c.case_id AS case_id,
+    # LEFT JOIN Cases c ON t.tanggal = c.tanggal;
+    df_staging_province_daily = pd.read_sql(sql_query_province_daily, connection)
 
-        # Insert into District_Monthly table
-        cur.execute("""
-            INSERT INTO District_Monthly (district_id, case_id, month, total)
-            VALUES ((SELECT district_id FROM District WHERE district_name = %s), 
-                    (SELECT Id FROM Case WHERE status_name = 'CLOSECONTACT'), 
-                    %s, %s)
-        """, (record["nama_kab"], month, record["CLOSECONTACT"]))
-        conn.commit()
+    # Aggregate for Province_Daily
+    # Group by province and calculate the total cases for each status
+    sql_query_province_monthly = '''
+    SELECT 
+        CASE 
+            WHEN t.nama_prov IS NOT NULL THEN p.province_id
+            ELSE NULL
+        END AS province_id,
+        MONTH(t.tanggal) AS month,
+        SUM(t.CLOSECONTACT + t.CONFIRMATION + t.PROBABLE + t.SUSPECT) AS total
+    FROM staging_table t
+    LEFT JOIN Province p ON t.nama_prov = p.province_name
+    GROUP BY 
+        CASE 
+            WHEN t.nama_prov IS NOT NULL THEN p.province_id
+            ELSE NULL
+        END,
+        MONTH(t.tanggal);
+    '''
+    df_staging_province_monthly = pd.read_sql(sql_query_province_monthly, connection)
 
-        # Insert into District_Yearly table
-        cur.execute("""
-            INSERT INTO District_Yearly (district_id, case_id, year, total)
-            VALUES ((SELECT district_id FROM District WHERE district_name = %s), 
-                    (SELECT Id FROM Case WHERE status_name = 'CLOSECONTACT'), 
-                    %s, %s)
-        """, (record["nama_kab"], year, record["CLOSECONTACT"]))
-        conn.commit()
+    # Aggregate for Province_Yearly
+    # Group by province and calculate the total cases for each status
+    sql_query_province_yearly = '''
+    SELECT 
+        CASE 
+            WHEN t.nama_prov IS NOT NULL THEN p.province_id
+            ELSE NULL
+        END AS province_id,
+        YEAR(t.tanggal) AS year,
+        SUM(t.CLOSECONTACT + t.CONFIRMATION + t.PROBABLE + t.SUSPECT) AS total
+    FROM staging_table t
+    LEFT JOIN Province p ON t.nama_prov = p.province_name
+    GROUP BY 
+        CASE 
+            WHEN t.nama_prov IS NOT NULL THEN p.province_id
+            ELSE NULL
+        END,
+        YEAR(t.tanggal);
+    '''
+    df_staging_province_yearly = pd.read_sql(sql_query_province_yearly, connection)
+    
+    # Aggregate for District_Monthly
+    # Group by province and calculate the total cases for each status
+    sql_query_district_monthly = '''
+    SELECT 
+        CASE 
+            WHEN t.nama_kab IS NOT NULL THEN d.district_id
+            ELSE NULL
+        END AS district_id,
+        MONTH(t.tanggal) AS month,
+        SUM(t.CLOSECONTACT + t.CONFIRMATION + t.PROBABLE + t.SUSPECT) AS total
+    FROM staging_table t
+    LEFT JOIN District d ON t.nama_kab = d.district_name
+    GROUP BY 
+    CASE 
+        WHEN t.nama_kab IS NOT NULL THEN d.district_id
+        ELSE NULL
+    END,
+    MONTH(t.tanggal);
+    '''
+    df_staging_district_monthly = pd.read_sql(sql_query_district_monthly, connection)
 
-    # Close the cursor and connection
-    cur.close()
-    conn.close()
+    # Aggregate for District_yearly
+    # Group by province and calculate the total cases for each status
+    sql_query_district_yearly = '''
+    SELECT 
+        CASE 
+            WHEN t.nama_kab IS NOT NULL THEN d.district_id
+            ELSE NULL
+        END AS district_id,
+        YEAR(t.tanggal) AS year,
+        SUM(t.CLOSECONTACT + t.CONFIRMATION + t.PROBABLE + t.SUSPECT) AS total
+    FROM staging_table t
+    LEFT JOIN District d ON t.nama_kab = d.district_name
+    GROUP BY 
+    CASE 
+        WHEN t.nama_kab IS NOT NULL THEN d.district_id
+        ELSE NULL
+    END,
+    YEAR(t.tanggal);
+    '''
+    df_staging_district_yearly = pd.read_sql(sql_query_district_yearly, connection)
 
-    pass
+    return df_staging_province_daily, df_staging_province_monthly, df_staging_province_yearly, df_staging_district_monthly, df_staging_district_yearly
 
 # Function to load aggregate data to PostgreSQL
-def load_aggregate_data_to_postgres():
+def load_aggregate_data_to_postgres(**kwargs):
+    ti = kwargs['ti']
+    # Retrieve DataFrames from XCom
+    df_staging_province_daily = ti.xcom_pull(task_ids='aggregate_district_data')[0]
+    df_staging_province_monthly = ti.xcom_pull(task_ids='aggregate_district_data')[1]
+    df_staging_province_yearly = ti.xcom_pull(task_ids='aggregate_district_data')[2]
+    df_staging_district_monthly = ti.xcom_pull(task_ids='aggregate_district_data')[3]
+    df_staging_district_yearly = ti.xcom_pull(task_ids='aggregate_district_data')[4]
+
     # Connect to PostgreSQL database
     connection = psycopg2.connect(
         host='final_project_de-postgres-1',
@@ -166,10 +235,27 @@ def load_aggregate_data_to_postgres():
         password='postgres',
         database='data_mart'
     )
-    cursor = connection.cursor()
+    # Create a connection string
+    connection_string = f'postgresql://postgres:postgres@final_project_de-postgres-1/data_mart'
+
+    # Create SQLAlchemy engine
+    engine = create_engine(connection_string)
     # Load aggregate data to PostgreSQL
-    # Example:
-    # cursor.execute("INSERT INTO table_name (column1, column2) VALUES (%s, %s)", (value1, value2))
+    cursor = connection.cursor()
+
+    # Write DataFrame to PostgreSQL database
+    df_staging_province_daily.to_sql(name='Province_Daily', con=engine, if_exists='append', index=False, method='multi', chunksize=1000)
+    df_staging_province_monthly.to_sql(name='Province_Monthly', con=engine, if_exists='append', index=False, method='multi', chunksize=1000)
+    df_staging_province_yearly.to_sql(name='Province_Yearly', con=engine, if_exists='append', index=False, method='multi', chunksize=1000)
+    df_staging_district_monthly.to_sql(name='District_Monthly', con=engine, if_exists='append', index=False, method='multi', chunksize=1000)
+    df_staging_district_yearly.to_sql(name='District_Yearly', con=engine, if_exists='append', index=False, method='multi', chunksize=1000)
+
+    df_staging_province_daily.to_csv('df_staging_province_daily.csv', index=False)
+    df_staging_province_monthly.to_csv('df_staging_province_monthly.csv', index=False)
+    df_staging_province_yearly.to_csv('df_staging_province_yearly.csv', index=False)
+    df_staging_district_monthly.to_csv('df_staging_district_monthly.csv', index=False)
+    df_staging_district_yearly.to_csv('df_staging_district_yearly.csv', index=False)
+    
     connection.commit()
     connection.close()
 
